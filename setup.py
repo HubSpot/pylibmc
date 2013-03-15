@@ -10,7 +10,8 @@ from distutils.core import setup, Extension
 # --with-libmemcached=<dir>: path to libmemcached package if needed
 
 cmd = None
-use_zlib = True
+use_zlib = False
+use_snappy = True
 pkgdirs = []  # incdirs and libdirs get these
 libs = ["memcached"]
 defs = []
@@ -51,9 +52,17 @@ for pkgdir in pkgdirs:
     incdirs.append(os.path.join(pkgdir, "include"))
     libdirs.append(os.path.join(pkgdir, "lib"))
 
+
 if use_zlib:
     libs.append("z")
     defs.append(("USE_ZLIB", None))
+
+if use_snappy:
+    libs.append("snappy")
+    defs.append(("USE_SNAPPY", None))
+
+if use_zlib or use_snappy:
+    defs.append(("USE_COMPRESSION", None))
 
 ## OS X non-PPC workaround
 

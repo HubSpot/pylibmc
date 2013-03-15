@@ -39,6 +39,10 @@
 #  define _ZLIB_ERR(s, rc) \
   PyErr_Format(PylibMCExc_MemcachedError, "zlib error %d in " s, rc);
 #endif
+#ifdef USE_SNAPPY
+#  include <snappy-c.h>
+#  define SNAPPY_BUFSZ (1 << 14)
+#endif
 
 #define PyBool_TEST(t) ((t) ? Py_True : Py_False)
 
@@ -218,9 +222,25 @@ error:
 }
 
 /* {{{ Compression helpers */
-#ifdef USE_ZLIB
+#ifdef USE_COMPRESSION
 static int _PylibMC_Deflate(char *value, size_t value_len,
                     char **result, size_t *result_len) {
+
+#ifdef USE_SNAPPY
+    *result_len = snappy_max_compressed_length(value_len);
+    *result = (char*) malloc(*result_len);
+
+    Py_BEGIN_ALLOW_THREADS;
+    if (snappy_compress(value, value_len, *result, result_len) != SNAPPY_OK) {
+        goto error;
+    }
+    Py_END_ALLOW_THREADS;
+
+    return 1;
+#endif
+
+#ifdef USE_ZLIB
+
     /* FIXME Failures are entirely silent. */
     int rc;
 
@@ -277,6 +297,8 @@ static int _PylibMC_Deflate(char *value, size_t value_len,
     *result_len = strm.total_out;
 
     return 1;
+#endif
+
 error:
     /* if any error occurred, we'll just use the original value
        instead of trying to compress it */
@@ -288,11 +310,32 @@ error:
 }
 
 static PyObject *_PylibMC_Inflate(char *value, size_t size) {
+
+    PyObject *out_obj;
+
+#ifdef USE_SNAPPY
+    size_t *output_length;
+    if (snappy_uncompressed_length(value, size, output_length) != SNAPPY_OK) {
+        goto error;
+    }
+    char* output = (char*)malloc(*output_length);
+
+    Py_BEGIN_ALLOW_THREADS;
+    if(snappy_uncompress(value, size, output, output_length) != SNAPPY_OK) {
+        goto error;
+    }
+    Py_END_ALLOW_THREADS;
+
+    PyString_AsStringAndSize(out_obj, &output, (Py_ssize_t*) output_length);
+
+    return out_obj;
+#endif
+
+#ifdef USE_ZLIB
     int rc;
     char *out;
-    PyObject *out_obj;
-    Py_ssize_t rvalsz;
     z_stream strm;
+    Py_ssize_t rvalsz;
 
     /* Output buffer */
     rvalsz = ZLIB_BUFSZ;
@@ -361,7 +404,11 @@ static PyObject *_PylibMC_Inflate(char *value, size_t size) {
     }
 
     _PyString_Resize(&out_obj, strm.total_out);
+
     return out_obj;
+#endif
+
+    
 error:
     Py_DECREF(out_obj);
     return NULL;
@@ -375,7 +422,7 @@ static PyObject *_PylibMC_parse_memcached_value(char *value, size_t size,
     PyObject *tmp = NULL;
     uint32_t dtype = flags & PYLIBMC_FLAG_TYPES;
 
-#if USE_ZLIB
+#if USE_COMPRESSION
     PyObject *inflated = NULL;
 
     /* Decompress value if necessary. */
@@ -425,7 +472,7 @@ static PyObject *_PylibMC_parse_memcached_value(char *value, size_t size,
 
 cleanup:
 
-#if USE_ZLIB
+#if USE_COMPRESSION
     Py_XDECREF(inflated);
 #endif
 
@@ -564,9 +611,9 @@ static PyObject *_PylibMC_RunSetCommandSingle(PylibMC_Client *self,
       return NULL;
     }
 
-#ifndef USE_ZLIB
+#ifndef USE_COMPRESSION
     if (min_compress) {
-      PyErr_SetString(PyExc_TypeError, "min_compress_len without zlib");
+      PyErr_SetString(PyExc_TypeError, "min_compress_len without compression enabled");
       return NULL;
     }
 #endif
@@ -614,9 +661,9 @@ static PyObject *_PylibMC_RunSetCommandMulti(PylibMC_Client *self,
         return NULL;
     }
 
-#ifndef USE_ZLIB
+#ifndef USE_COMPRESSION
     if (min_compress) {
-        PyErr_SetString(PyExc_TypeError, "min_compress_len without zlib");
+        PyErr_SetString(PyExc_TypeError, "min_compress_len without compression enabled");
         return NULL;
     }
 #endif
@@ -905,7 +952,7 @@ static bool _PylibMC_RunSetCommand(PylibMC_Client* self,
         size_t value_len = (size_t)mset->value_len;
         uint32_t flags = mset->flags;
 
-#ifdef USE_ZLIB
+#ifdef USE_COMPRESSION
         char *compressed_value = NULL;
         size_t compressed_len = 0;
 
@@ -935,7 +982,7 @@ static bool _PylibMC_RunSetCommand(PylibMC_Client* self,
                    value, value_len, mset->time, flags);
         }
 
-#ifdef USE_ZLIB
+#ifdef USE_COMPRESSION
         if (compressed_value != NULL) {
             free(compressed_value);
         }
@@ -2230,7 +2277,7 @@ by using comma-separation. Good luck with that.\n");
     PyModule_ADD_REF(module, "support_sasl", Py_False);
 #endif
 
-#ifdef USE_ZLIB
+#ifdef USE_COMPRESSION
     PyModule_ADD_REF(module, "support_compression", Py_True);
 #else
     PyModule_ADD_REF(module, "support_compression", Py_False);
