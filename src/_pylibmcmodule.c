@@ -50,6 +50,233 @@
     { Py_INCREF(obj); \
       PyModule_AddObject(mod, nam, obj); }
 
+#ifdef USE_COMPRESSION
+
+typedef struct {
+    PyObject* (*inflate)(char *value, size_t size);
+    int (*deflate)(char *value, size_t value_len, char **result, size_t *result_len);
+} CompressionStrategy;
+
+#endif
+
+#ifdef USE_SNAPPY
+
+static PyObject *snappy_inflate(char *value, size_t size) {
+    PyObject *out_obj;
+
+    size_t *output_length;
+    if (snappy_uncompressed_length(value, size, output_length) != SNAPPY_OK) {
+        goto error;
+    }
+    char* output = (char*)malloc(*output_length);
+
+    Py_BEGIN_ALLOW_THREADS;
+    if(snappy_uncompress(value, size, output, output_length) != SNAPPY_OK) {
+        goto error;
+    }
+    Py_END_ALLOW_THREADS;
+
+    PyString_AsStringAndSize(out_obj, &output, (Py_ssize_t*) output_length);
+
+    return out_obj;
+
+error:
+    Py_DECREF(out_obj);
+    return NULL;
+}
+
+static int snappy_deflate(char *value, size_t value_len, char **result, size_t *result_len) {
+    *result_len = snappy_max_compressed_length(value_len);
+    *result = (char*) malloc(*result_len);
+
+    Py_BEGIN_ALLOW_THREADS;
+    if (snappy_compress(value, value_len, *result, result_len) != SNAPPY_OK) {
+        goto error;
+    }
+    Py_END_ALLOW_THREADS;
+
+    return 1;
+
+error:
+    /* if any error occurred, we'll just use the original value
+       instead of trying to compress it */
+    if(*result != NULL) {
+      free(*result);
+      *result = NULL;
+    }
+    return 0;
+}
+
+#endif
+
+#ifdef USE_ZLIB
+
+static PyObject *zlib_inflate(char *value, size_t size) {
+    PyObject *out_obj;
+
+    int rc;
+    char *out;
+    z_stream strm;
+    Py_ssize_t rvalsz;
+
+    /* Output buffer */
+    rvalsz = ZLIB_BUFSZ;
+    out_obj = PyString_FromStringAndSize(NULL, rvalsz);
+    if (out_obj == NULL) {
+        return NULL;
+    }
+    out = PyString_AS_STRING(out_obj);
+
+    /* TODO 64-bit fix size/rvalsz */
+    assert(size < 0xffffffffU);
+    assert(rvalsz < 0xffffffffU);
+
+    /* Set up zlib stream. */
+    strm.avail_in = (uInt)size;
+    strm.avail_out = (uInt)rvalsz;
+    strm.next_in = (Byte *)value;
+    strm.next_out = (Byte *)out;
+
+    strm.zalloc = (alloc_func)NULL;
+    strm.zfree = (free_func)Z_NULL;
+
+    /* TODO Add controlling of windowBits with inflateInit2? */
+    if ((rc = inflateInit((z_streamp)&strm)) != Z_OK) {
+        _ZLIB_ERR("inflateInit", rc);
+        goto error;
+    }
+
+    do {
+        Py_BEGIN_ALLOW_THREADS;
+        rc = inflate((z_streamp)&strm, Z_FINISH);
+        Py_END_ALLOW_THREADS;
+
+        switch (rc) {
+        case Z_STREAM_END:
+            break;
+        /* When a Z_BUF_ERROR occurs, we should be out of memory.
+         * This is also true for Z_OK, hence the fall-through. */
+        case Z_BUF_ERROR:
+            if (strm.avail_out) {
+                _ZLIB_ERR("inflate", rc);
+                inflateEnd(&strm);
+                goto error;
+            }
+        /* Fall-through */
+        case Z_OK:
+            if (_PyString_Resize(&out_obj, (Py_ssize_t)(rvalsz << 1)) < 0) {
+                inflateEnd(&strm);
+                goto error;
+            }
+            /* Wind forward */
+            out = PyString_AS_STRING(out_obj);
+            strm.next_out = (Byte *)(out + rvalsz);
+            strm.avail_out = (uInt)rvalsz;
+            rvalsz = rvalsz << 1;
+            break;
+        default:
+            inflateEnd(&strm);
+            goto error;
+        }
+    } while (rc != Z_STREAM_END);
+
+    if ((rc = inflateEnd(&strm)) != Z_OK) {
+        _ZLIB_ERR("inflateEnd", rc);
+        goto error;
+    }
+
+    _PyString_Resize(&out_obj, strm.total_out);
+
+    return out_obj;
+
+
+error:
+    Py_DECREF(out_obj);
+    return NULL;
+}
+
+static int zlib_deflate(char *value, size_t value_len, char **result, size_t *result_len) {
+    int rc;
+
+    z_stream strm;
+    *result = NULL;
+    *result_len = 0;
+
+    /* Don't ask me about this one. Got it from zlibmodule.c in Python 2.6. */
+    ssize_t out_sz = value_len + value_len / 1000 + 12 + 1;
+
+    if ((*result = malloc(out_sz)) == NULL) {
+      goto error;
+    }
+
+    /* TODO Should break up next_in into blocks of max 0xffffffff in length. */
+    assert(value_len < 0xffffffffU);
+    assert(out_sz < 0xffffffffU);
+
+    strm.avail_in = (uInt)value_len;
+    strm.avail_out = (uInt)out_sz;
+    strm.next_in = (Bytef *)value;
+    strm.next_out = (Bytef *)*result;
+
+    /* we just pre-allocated all of it up front */
+    strm.zalloc = (alloc_func)NULL;
+    strm.zfree = (free_func)Z_NULL;
+
+    /* TODO Expose compression level somehow. */
+    if (deflateInit((z_streamp)&strm, Z_BEST_SPEED) != Z_OK) {
+        goto error;
+    }
+
+    Py_BEGIN_ALLOW_THREADS;
+    rc = deflate((z_streamp)&strm, Z_FINISH);
+    Py_END_ALLOW_THREADS;
+
+    if (rc != Z_STREAM_END) {
+        _ZLIB_ERR("deflate", rc);
+        goto error;
+    }
+
+    if (deflateEnd((z_streamp)&strm) != Z_OK) {
+        goto error;
+    }
+
+    if(strm.total_out >= value_len) {
+      /* if we didn't actually save anything, don't bother storing it
+         compressed */
+      goto error;
+    }
+
+    /* *result should already be populated since that's the address we
+       passed into the z_stream */
+    *result_len = strm.total_out;
+
+    return 1;
+
+error:
+    /* if any error occurred, we'll just use the original value
+       instead of trying to compress it */
+    if(*result != NULL) {
+      free(*result);
+      *result = NULL;
+    }
+    return 0;
+}
+
+#endif
+
+#ifdef USE_COMPRESSION
+
+static const CompressionStrategy compressionStrategies[] = {
+#ifdef USE_ZLIB
+    {zlib_inflate, zlib_deflate},
+#endif
+#ifdef USE_SNAPPY
+    {snappy_inflate, snappy_deflate},
+#endif
+};
+
+#endif
+
 
 /* {{{ Type methods */
 static PylibMC_Client *PylibMC_ClientType_new(PyTypeObject *type,
@@ -226,192 +453,20 @@ error:
 static int _PylibMC_Deflate(char *value, size_t value_len,
                     char **result, size_t *result_len) {
 
-#ifdef USE_SNAPPY
-    *result_len = snappy_max_compressed_length(value_len);
-    *result = (char*) malloc(*result_len);
-
-    Py_BEGIN_ALLOW_THREADS;
-    if (snappy_compress(value, value_len, *result, result_len) != SNAPPY_OK) {
-        goto error;
-    }
-    Py_END_ALLOW_THREADS;
-
-    return 1;
-#endif
-
-#ifdef USE_ZLIB
-
-    /* FIXME Failures are entirely silent. */
-    int rc;
-
-    z_stream strm;
-    *result = NULL;
-    *result_len = 0;
-
-    /* Don't ask me about this one. Got it from zlibmodule.c in Python 2.6. */
-    ssize_t out_sz = value_len + value_len / 1000 + 12 + 1;
-
-    if ((*result = malloc(out_sz)) == NULL) {
-      goto error;
+    const CompressionStrategy *cs;
+    for (cs = compressionStrategies; ; cs++) {
+        return cs->deflate(value, value_len, result, result_len);
     }
 
-    /* TODO Should break up next_in into blocks of max 0xffffffff in length. */
-    assert(value_len < 0xffffffffU);
-    assert(out_sz < 0xffffffffU);
-
-    strm.avail_in = (uInt)value_len;
-    strm.avail_out = (uInt)out_sz;
-    strm.next_in = (Bytef *)value;
-    strm.next_out = (Bytef *)*result;
-
-    /* we just pre-allocated all of it up front */
-    strm.zalloc = (alloc_func)NULL;
-    strm.zfree = (free_func)Z_NULL;
-
-    /* TODO Expose compression level somehow. */
-    if (deflateInit((z_streamp)&strm, Z_BEST_SPEED) != Z_OK) {
-        goto error;
-    }
-
-    Py_BEGIN_ALLOW_THREADS;
-    rc = deflate((z_streamp)&strm, Z_FINISH);
-    Py_END_ALLOW_THREADS;
-
-    if (rc != Z_STREAM_END) {
-        _ZLIB_ERR("deflate", rc);
-        goto error;
-    }
-
-    if (deflateEnd((z_streamp)&strm) != Z_OK) {
-        goto error;
-    }
-
-    if(strm.total_out >= value_len) {
-      /* if we didn't actually save anything, don't bother storing it
-         compressed */
-      goto error;
-    }
-
-    /* *result should already be populated since that's the address we
-       passed into the z_stream */
-    *result_len = strm.total_out;
-
-    return 1;
-#endif
-
-error:
-    /* if any error occurred, we'll just use the original value
-       instead of trying to compress it */
-    if(*result != NULL) {
-      free(*result);
-      *result = NULL;
-    }
-    return 0;
 }
 
 static PyObject *_PylibMC_Inflate(char *value, size_t size) {
 
-    PyObject *out_obj;
-
-#ifdef USE_SNAPPY
-    size_t *output_length;
-    if (snappy_uncompressed_length(value, size, output_length) != SNAPPY_OK) {
-        goto error;
-    }
-    char* output = (char*)malloc(*output_length);
-
-    Py_BEGIN_ALLOW_THREADS;
-    if(snappy_uncompress(value, size, output, output_length) != SNAPPY_OK) {
-        goto error;
-    }
-    Py_END_ALLOW_THREADS;
-
-    PyString_AsStringAndSize(out_obj, &output, (Py_ssize_t*) output_length);
-
-    return out_obj;
-#endif
-
-#ifdef USE_ZLIB
-    int rc;
-    char *out;
-    z_stream strm;
-    Py_ssize_t rvalsz;
-
-    /* Output buffer */
-    rvalsz = ZLIB_BUFSZ;
-    out_obj = PyString_FromStringAndSize(NULL, rvalsz);
-    if (out_obj == NULL) {
-        return NULL;
-    }
-    out = PyString_AS_STRING(out_obj);
-
-    /* TODO 64-bit fix size/rvalsz */
-    assert(size < 0xffffffffU);
-    assert(rvalsz < 0xffffffffU);
-
-    /* Set up zlib stream. */
-    strm.avail_in = (uInt)size;
-    strm.avail_out = (uInt)rvalsz;
-    strm.next_in = (Byte *)value;
-    strm.next_out = (Byte *)out;
-
-    strm.zalloc = (alloc_func)NULL;
-    strm.zfree = (free_func)Z_NULL;
-
-    /* TODO Add controlling of windowBits with inflateInit2? */
-    if ((rc = inflateInit((z_streamp)&strm)) != Z_OK) {
-        _ZLIB_ERR("inflateInit", rc);
-        goto error;
+    const CompressionStrategy *cs;
+    for (cs = compressionStrategies; ; cs++) {
+        return cs->inflate(value, size);
     }
 
-    do {
-        Py_BEGIN_ALLOW_THREADS;
-        rc = inflate((z_streamp)&strm, Z_FINISH);
-        Py_END_ALLOW_THREADS;
-
-        switch (rc) {
-        case Z_STREAM_END:
-            break;
-        /* When a Z_BUF_ERROR occurs, we should be out of memory.
-         * This is also true for Z_OK, hence the fall-through. */
-        case Z_BUF_ERROR:
-            if (strm.avail_out) {
-                _ZLIB_ERR("inflate", rc);
-                inflateEnd(&strm);
-                goto error;
-            }
-        /* Fall-through */
-        case Z_OK:
-            if (_PyString_Resize(&out_obj, (Py_ssize_t)(rvalsz << 1)) < 0) {
-                inflateEnd(&strm);
-                goto error;
-            }
-            /* Wind forward */
-            out = PyString_AS_STRING(out_obj);
-            strm.next_out = (Byte *)(out + rvalsz);
-            strm.avail_out = (uInt)rvalsz;
-            rvalsz = rvalsz << 1;
-            break;
-        default:
-            inflateEnd(&strm);
-            goto error;
-        }
-    } while (rc != Z_STREAM_END);
-
-    if ((rc = inflateEnd(&strm)) != Z_OK) {
-        _ZLIB_ERR("inflateEnd", rc);
-        goto error;
-    }
-
-    _PyString_Resize(&out_obj, strm.total_out);
-
-    return out_obj;
-#endif
-
-    
-error:
-    Py_DECREF(out_obj);
-    return NULL;
 }
 #endif
 /* }}} */

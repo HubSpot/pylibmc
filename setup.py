@@ -10,7 +10,7 @@ from distutils.core import setup, Extension
 # --with-libmemcached=<dir>: path to libmemcached package if needed
 
 cmd = None
-use_zlib = False
+use_zlib = True
 use_snappy = True
 pkgdirs = []  # incdirs and libdirs get these
 libs = ["memcached"]
