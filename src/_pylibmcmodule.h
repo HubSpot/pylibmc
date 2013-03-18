@@ -58,7 +58,7 @@ typedef ssize_t Py_ssize_t;
 #define PYLIBMC_SERVER_UNIX  (1 << 2)
 
 /* {{{ Key flags from python-memcached
- * Some flags (like the compression one, ZLIB) are combined with others.
+ * Some flags (like the compression one) are combined with others.
  */
 #define PYLIBMC_FLAG_NONE    0
 #define PYLIBMC_FLAG_PICKLE  (1 << 0)
@@ -69,9 +69,11 @@ typedef ssize_t Py_ssize_t;
 #define PYLIBMC_FLAG_TYPES   (PYLIBMC_FLAG_PICKLE | PYLIBMC_FLAG_INTEGER | \
                               PYLIBMC_FLAG_LONG | PYLIBMC_FLAG_BOOL)
 /* Modifier flags */
-#define PYLIBMC_FLAG_ZLIB    (1 << 3)
-#define PYLIBMC_FLAG_SNAPPY    (1 << 4)
+#define PYLIBMC_FLAG_COMPRESSION    (1 << 3)
 /* }}} */
+
+#define PYLIBMC_FLAG_ZLIB    (1 << 0)
+#define PYLIBMC_FLAG_SNAPPY    (1 << 1)
 
 typedef memcached_return (*_PylibMC_SetCommand)(memcached_st *, const char *,
         size_t, const char *, size_t, time_t, uint32_t);

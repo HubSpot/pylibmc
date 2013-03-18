@@ -67,7 +67,7 @@ static PyObject *snappy_inflate(char *value, size_t size) {
     }
     Py_END_ALLOW_THREADS;
 
-    PyString_AsStringAndSize(out_obj, &output, (Py_ssize_t*) output_length);
+    out_obj = PyString_FromStringAndSize(output, (Py_ssize_t) output_length);
 
     return out_obj;
 
@@ -480,18 +480,18 @@ error:
 }
 
 static PyObject *_PylibMC_parse_memcached_value(char *value, size_t size,
-        uint32_t flags) {
+        uint32_t flags, int compression_strategy) {
     PyObject *retval = NULL;
     PyObject *tmp = NULL;
     uint32_t dtype = flags & PYLIBMC_FLAG_TYPES;
 
-    int compression_strategy = flags & (PYLIBMC_FLAG_ZLIB | PYLIBMC_FLAG_SNAPPY);
+    int compression_flag = flags & (PYLIBMC_FLAG_COMPRESSION);
 
 #if USE_COMPRESSION
     PyObject *inflated = NULL;
 
     /* Decompress value if necessary. */
-    if (compression_strategy) {
+    if (compression_flag) {
         if ((inflated = _PylibMC_Inflate(value, size, compression_strategy)) == NULL) {
             return NULL;
         }
@@ -499,7 +499,7 @@ static PyObject *_PylibMC_parse_memcached_value(char *value, size_t size,
         size = PyString_GET_SIZE(inflated);
     }
 #else
-    if (compression_strategy) {
+    if (compression_flag) {
         PyErr_SetString(PylibMCExc_MemcachedError,
             "value for key compressed, unable to inflate");
         return NULL;
@@ -546,10 +546,11 @@ cleanup:
     return retval;
 }
 
-static PyObject *_PylibMC_parse_memcached_result(memcached_result_st *res) {
+static PyObject *_PylibMC_parse_memcached_result(memcached_result_st *res, int compression_strategy) {
         return _PylibMC_parse_memcached_value((char *)memcached_result_value(res),
                                               memcached_result_length(res),
-                                              memcached_result_flags(res));
+                                              memcached_result_flags(res),
+                                              compression_strategy);
 }
 
 static PyObject *PylibMC_Client_get(PylibMC_Client *self, PyObject *arg) {
@@ -572,7 +573,7 @@ static PyObject *PylibMC_Client_get(PylibMC_Client *self, PyObject *arg) {
     Py_END_ALLOW_THREADS;
 
     if (mc_val != NULL) {
-        PyObject *r = _PylibMC_parse_memcached_value(mc_val, val_size, flags);
+        PyObject *r = _PylibMC_parse_memcached_value(mc_val, val_size, flags, self->compression_strategy);
         free(mc_val);
         return r;
     } else if (error == MEMCACHED_SUCCESS) {
@@ -621,7 +622,7 @@ static PyObject *PylibMC_Client_gets(PylibMC_Client *self, PyObject *arg) {
 
     if (rc == MEMCACHED_SUCCESS && res != NULL) {
         ret = Py_BuildValue("(NL)",
-                            _PylibMC_parse_memcached_result(res),
+                            _PylibMC_parse_memcached_result(res, self->compression_strategy),
                             memcached_result_cas(res));
 
         /* we have to fetch the last result from the mget cursor */
@@ -1034,7 +1035,7 @@ static bool _PylibMC_RunSetCommand(PylibMC_Client* self,
              * needs to get back at the old *value at some point */
             value = compressed_value;
             value_len = compressed_len;
-            flags |= self->compression_strategy;
+            flags |= PYLIBMC_FLAG_COMPRESSION;
         }
 #endif
 
@@ -1563,7 +1564,7 @@ static PyObject *PylibMC_Client_get_multi(
             goto unpack_error;
 
         /* Parse out value */
-        val = _PylibMC_parse_memcached_result(res);
+        val = _PylibMC_parse_memcached_result(res, self->compression_strategy);
         if (val == NULL)
             goto unpack_error;
 

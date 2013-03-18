@@ -85,8 +85,8 @@ def translate_server_specs(servers):
         addr_tups.append(addr_tup)
     return addr_tups
 
-ZLIB_COMPRESSION_STRATEGY = 1 << 3
-SNAPPY_COMPRESSION_STRATEGY = 1 << 4
+ZLIB_COMPRESSION_STRATEGY = 1 << 0
+SNAPPY_COMPRESSION_STRATEGY = 1 << 1
 
 
 class Client(_pylibmc.client):
