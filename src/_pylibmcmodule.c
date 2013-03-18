@@ -41,7 +41,6 @@
 #endif
 #ifdef USE_SNAPPY
 #  include <snappy-c.h>
-#  define SNAPPY_BUFSZ (1 << 14)
 #endif
 
 #define PyBool_TEST(t) ((t) ? Py_True : Py_False)
@@ -56,14 +55,14 @@
 static PyObject *snappy_inflate(char *value, size_t size) {
     PyObject *out_obj;
 
-    size_t *output_length;
-    if (snappy_uncompressed_length(value, size, output_length) != SNAPPY_OK) {
+    size_t output_length;
+    if (snappy_uncompressed_length(value, size, &output_length) != SNAPPY_OK) {
         goto error;
     }
-    char* output = (char*)malloc(*output_length);
+    char* output = (char*)malloc(output_length);
 
     Py_BEGIN_ALLOW_THREADS;
-    if(snappy_uncompress(value, size, output, output_length) != SNAPPY_OK) {
+    if(snappy_uncompress(value, size, output, &output_length) != SNAPPY_OK) {
         goto error;
     }
     Py_END_ALLOW_THREADS;
@@ -259,38 +258,47 @@ error:
 #ifdef USE_COMPRESSION
 
 typedef struct {
+    int compression_strategy;
     PyObject* (*inflate)(char *value, size_t size);
     int (*deflate)(char *value, size_t value_len, char **result, size_t *result_len);
 } CompressionStrategy;
 
 static const CompressionStrategy compressionStrategies[] = {
 #ifdef USE_ZLIB
-    {zlib_inflate, zlib_deflate},
+    {PYLIBMC_FLAG_ZLIB, zlib_inflate, zlib_deflate},
 #endif
 #ifdef USE_SNAPPY
-    {snappy_inflate, snappy_deflate},
+    {PYLIBMC_FLAG_SNAPPY, snappy_inflate, snappy_deflate},
 #endif
 };
 
 
 /* {{{ Compression helpers */
 static int _PylibMC_Deflate(char *value, size_t value_len,
-                    char **result, size_t *result_len) {
+                    char **result, size_t *result_len, int compression_strategy) {
 
     const CompressionStrategy *cs;
     for (cs = compressionStrategies; ; cs++) {
-        return cs->deflate(value, value_len, result, result_len);
+        if (compression_strategy & cs->compression_strategy) {
+            return cs->deflate(value, value_len, result, result_len);
+        }
     }
 
+     PyErr_Format(PyExc_TypeError, "compression_strategy %d not found", compression_strategy);
 }
 
-static PyObject *_PylibMC_Inflate(char *value, size_t size) {
+static PyObject *_PylibMC_Inflate(char *value, size_t size, int compression_strategy) {
+
+    
 
     const CompressionStrategy *cs;
     for (cs = compressionStrategies; ; cs++) {
-        return cs->inflate(value, size);
+        if (compression_strategy & cs->compression_strategy) {
+            return cs->inflate(value, size);
+        }
     }
 
+    PyErr_Format(PyExc_TypeError, "compression_strategy %d not found", compression_strategy);
 }
 #endif
 /* }}} */
@@ -308,6 +316,7 @@ static PylibMC_Client *PylibMC_ClientType_new(PyTypeObject *type,
     if (self != NULL) {
         self->mc = memcached_create(NULL);
         self->sasl_set = false;
+        self->compression_strategy = 0;
     }
 
     return self;
@@ -332,14 +341,18 @@ static int PylibMC_Client_init(PylibMC_Client *self, PyObject *args,
     PyObject *srvs, *srvs_it, *c_srv;
     unsigned char set_stype = 0, bin = 0, got_server = 0;
     const char *user = NULL, *pass = NULL;
+    int compression_strategy = 0;
     memcached_return rc;
 
-    static char *kws[] = { "servers", "binary", "username", "password", NULL };
+    static char *kws[] = { "servers", "binary", "username", "password", "compression_strategy", NULL };
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwds, "O|bzz", kws,
-                                     &srvs, &bin, &user, &pass)) {
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "O|bzzi", kws,
+                                     &srvs, &bin, &user, &pass,
+                                     &compression_strategy)) {
         return -1;
     }
+
+    self->compression_strategy = compression_strategy;
 
     if ((srvs_it = PyObject_GetIter(srvs)) == NULL) {
         return -1;
@@ -472,19 +485,21 @@ static PyObject *_PylibMC_parse_memcached_value(char *value, size_t size,
     PyObject *tmp = NULL;
     uint32_t dtype = flags & PYLIBMC_FLAG_TYPES;
 
+    int compression_strategy = flags & (PYLIBMC_FLAG_ZLIB | PYLIBMC_FLAG_SNAPPY);
+
 #if USE_COMPRESSION
     PyObject *inflated = NULL;
 
     /* Decompress value if necessary. */
-    if (flags & PYLIBMC_FLAG_ZLIB) {
-        if ((inflated = _PylibMC_Inflate(value, size)) == NULL) {
+    if (compression_strategy) {
+        if ((inflated = _PylibMC_Inflate(value, size, compression_strategy)) == NULL) {
             return NULL;
         }
         value = PyString_AS_STRING(inflated);
         size = PyString_GET_SIZE(inflated);
     }
 #else
-    if (flags & PYLIBMC_FLAG_ZLIB) {
+    if (compression_strategy) {
         PyErr_SetString(PylibMCExc_MemcachedError,
             "value for key compressed, unable to inflate");
         return NULL;
@@ -1009,7 +1024,8 @@ static bool _PylibMC_RunSetCommand(PylibMC_Client* self,
         if (min_compress && value_len >= min_compress) {
             Py_BLOCK_THREADS;
             _PylibMC_Deflate(value, value_len,
-                             &compressed_value, &compressed_len);
+                             &compressed_value, &compressed_len,
+                             self->compression_strategy);
             Py_UNBLOCK_THREADS;
         }
 
@@ -1018,7 +1034,7 @@ static bool _PylibMC_RunSetCommand(PylibMC_Client* self,
              * needs to get back at the old *value at some point */
             value = compressed_value;
             value_len = compressed_len;
-            flags |= PYLIBMC_FLAG_ZLIB;
+            flags |= self->compression_strategy;
         }
 #endif
 

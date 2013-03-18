@@ -85,9 +85,13 @@ def translate_server_specs(servers):
         addr_tups.append(addr_tup)
     return addr_tups
 
+ZLIB_COMPRESSION_STRATEGY = 1 << 3
+SNAPPY_COMPRESSION_STRATEGY = 1 << 4
+
+
 class Client(_pylibmc.client):
     def __init__(self, servers, behaviors=None, binary=False,
-                 username=None, password=None):
+                 username=None, password=None, compression_strategy=ZLIB_COMPRESSION_STRATEGY):
         """Initialize a memcached client instance.
 
         This connects to the servers in *servers*, which will default to being
@@ -104,7 +108,8 @@ class Client(_pylibmc.client):
         self.addresses = list(servers)
         super(Client, self).__init__(servers=translate_server_specs(servers),
                                      binary=binary, username=username,
-                                     password=password)
+                                     password=password,
+                                     compression_strategy=compression_strategy)
         if behaviors is not None:
             self.set_behaviors(behaviors)
 

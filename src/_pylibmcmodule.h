@@ -70,6 +70,7 @@ typedef ssize_t Py_ssize_t;
                               PYLIBMC_FLAG_LONG | PYLIBMC_FLAG_BOOL)
 /* Modifier flags */
 #define PYLIBMC_FLAG_ZLIB    (1 << 3)
+#define PYLIBMC_FLAG_SNAPPY    (1 << 4)
 /* }}} */
 
 typedef memcached_return (*_PylibMC_SetCommand)(memcached_st *, const char *,
@@ -260,6 +261,7 @@ typedef struct {
     PyObject_HEAD
     memcached_st *mc;
     uint8_t sasl_set;
+    int compression_strategy;
 } PylibMC_Client;
 
 /* {{{ Prototypes */
@@ -314,7 +316,7 @@ static bool _PylibMC_RunSetCommand(PylibMC_Client *self,
                                    pylibmc_mset *msets, size_t nkeys,
                                    size_t min_compress);
 static int _PylibMC_Deflate(char *value, size_t value_len,
-                            char **result, size_t *result_len);
+                            char **result, size_t *result_len, int compression_strategy);
 static bool _PylibMC_IncrDecr(PylibMC_Client *, pylibmc_incr *, size_t);
 
 /* }}} */
