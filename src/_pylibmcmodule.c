@@ -50,14 +50,6 @@
     { Py_INCREF(obj); \
       PyModule_AddObject(mod, nam, obj); }
 
-#ifdef USE_COMPRESSION
-
-typedef struct {
-    PyObject* (*inflate)(char *value, size_t size);
-    int (*deflate)(char *value, size_t value_len, char **result, size_t *result_len);
-} CompressionStrategy;
-
-#endif
 
 #ifdef USE_SNAPPY
 
@@ -266,6 +258,11 @@ error:
 
 #ifdef USE_COMPRESSION
 
+typedef struct {
+    PyObject* (*inflate)(char *value, size_t size);
+    int (*deflate)(char *value, size_t value_len, char **result, size_t *result_len);
+} CompressionStrategy;
+
 static const CompressionStrategy compressionStrategies[] = {
 #ifdef USE_ZLIB
     {zlib_inflate, zlib_deflate},
@@ -275,7 +272,28 @@ static const CompressionStrategy compressionStrategies[] = {
 #endif
 };
 
+
+/* {{{ Compression helpers */
+static int _PylibMC_Deflate(char *value, size_t value_len,
+                    char **result, size_t *result_len) {
+
+    const CompressionStrategy *cs;
+    for (cs = compressionStrategies; ; cs++) {
+        return cs->deflate(value, value_len, result, result_len);
+    }
+
+}
+
+static PyObject *_PylibMC_Inflate(char *value, size_t size) {
+
+    const CompressionStrategy *cs;
+    for (cs = compressionStrategies; ; cs++) {
+        return cs->inflate(value, size);
+    }
+
+}
 #endif
+/* }}} */
 
 
 /* {{{ Type methods */
@@ -447,29 +465,6 @@ error:
     Py_DECREF(srvs_it);
     return -1;
 }
-
-/* {{{ Compression helpers */
-#ifdef USE_COMPRESSION
-static int _PylibMC_Deflate(char *value, size_t value_len,
-                    char **result, size_t *result_len) {
-
-    const CompressionStrategy *cs;
-    for (cs = compressionStrategies; ; cs++) {
-        return cs->deflate(value, value_len, result, result_len);
-    }
-
-}
-
-static PyObject *_PylibMC_Inflate(char *value, size_t size) {
-
-    const CompressionStrategy *cs;
-    for (cs = compressionStrategies; ; cs++) {
-        return cs->inflate(value, size);
-    }
-
-}
-#endif
-/* }}} */
 
 static PyObject *_PylibMC_parse_memcached_value(char *value, size_t size,
         uint32_t flags) {
