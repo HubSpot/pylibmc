@@ -87,7 +87,7 @@ def translate_server_specs(servers):
 
 class Client(_pylibmc.client):
     def __init__(self, servers, behaviors=None, binary=False,
-                 username=None, password=None, max_value_size=None):
+                 username=None, password=None, max_value_size=0):
         """Initialize a memcached client instance.
 
         This connects to the servers in *servers*, which will default to being
