@@ -10,6 +10,7 @@ from distutils.core import setup, Extension
 # --with-libmemcached=<dir>: path to libmemcached package if needed
 
 cmd = None
+include_touch = False
 use_zlib = True
 pkgdirs = []  # incdirs and libdirs get these
 libs = ["memcached"]
@@ -39,6 +40,8 @@ for arg in sys.argv[1:]:
         continue
     elif arg == "--gen-setup":
         cmd = arg[2:]
+    elif arg == "--include-touch":
+        include_touch = True
     elif "=" in arg:
         if arg.startswith("--with-libmemcached=") or \
            arg.startswith("--with-zlib="):
@@ -46,6 +49,9 @@ for arg in sys.argv[1:]:
             continue
     unprocessed.append(arg)
 sys.argv[1:] = unprocessed
+
+if include_touch:
+    defs.append(("INCLUDE_TOUCH", None))
 
 for pkgdir in pkgdirs:
     incdirs.append(os.path.join(pkgdir, "include"))

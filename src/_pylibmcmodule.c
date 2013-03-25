@@ -1046,6 +1046,8 @@ static PyObject *PylibMC_Client_delete(PylibMC_Client *self, PyObject *args) {
     return NULL;
 }
 
+#ifdef INCLUDE_TOUCH
+
 static PyObject *PylibMC_Client_touch(PylibMC_Client *self, PyObject *args) {
     char *key;
     long seconds;
@@ -1073,6 +1075,8 @@ static PyObject *PylibMC_Client_touch(PylibMC_Client *self, PyObject *args) {
 
     return NULL;
 }
+
+#endif
 
 
 /* {{{ Increment & decrement */
